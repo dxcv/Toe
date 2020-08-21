@@ -8,8 +8,11 @@ import sys
 import logging
 import os
 # https://www.cnblogs.com/sunsky303/p/9562300.html
+def logFileNameGen(name):
+    return "./Log/" + name + ".txt"
 class Logger:
-    def __init__(self, filename="./Log/test.log"):
+    def __init__(self, name = "test"):
+        filename = logFileNameGen(name)
         self.logger = logging.getLogger("simple_logger")
         self.logger.setLevel(logging.DEBUG)
 
