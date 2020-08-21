@@ -50,6 +50,8 @@ class StrategyBase4RT:
 
 
 
+
+
     def __init__(
         self, code, 
         data: pd.DataFrame, 
@@ -69,8 +71,9 @@ class StrategyBase4RT:
         self.ensure_profit = ensure_profit
 
         # 通过变量名去操作 data4cal， 避免写死
-        self.bid = "bid1"
-        self.ask = "ask1"
+        # 废弃掉了，因为 逻辑上 p1 和p2不应该是一个属性
+        self.p1 = "bid1"
+        self.p2 = "ask1"
 
     # 一个决定一次交易 买/卖 多少手股票的函数
     #@property，有参数无法设置成property
@@ -164,17 +167,33 @@ class StrategyBase4RT:
         else:
             return False
 
-    # 加入滑点, 
-    def trade(self):
+    # 加入滑点,  self.p1是 bid, self.p2是ask
+    # 先临时这么写，后续改为 *args
+    def trade(self,p1 = "ask1", p2 = "bid1", s1="asize1", s2="bsize1"):
+        """
+        部分交易，这个过程比较复杂，需要绘图理解
+        :param p1:
+        :param p2:
+        :param s1:
+        :param s2:
+        :return:
+        """
+
         for date, data in self.data4cal.iterrows():
-            if (not self.isholding) and data["buy_signal"]:
-                pass
+            if (not self.isenough) and data["buy_signal"]:
+                hands_to_trade = self.hands2trade(data[p1],data[s1],Toward.buy)
+                self.current_hands += hands_to_trade
+                cost = hands_to_trade * 100 * data[p1] + self.commissionCal(data[p1],hands_to_trade,Toward.buy)
+                self.events_list.append(("b", date, self.current_funds, #记录买仓之前的历史资金，在这种交易模式下应该废弃掉
+                                         ))
+                self.current_funds -= cost
+                self.last_buy_date = date
+                if self.logger:
+                    print("Bought {} hands of {} on {} at {} price, cost {}".format(hands_to_trade, self.code, date,
+                                                                                    data.close, cost))
+
             elif (self.isholding) and data["sell_signal"]:
                 pass
-
-
-
-
     # self.current_hands 修改为 pd的一个column，这样方便计算 实时权益
     def final(self, df: pd.DataFrame):
         for date, data in df.iterrows():
