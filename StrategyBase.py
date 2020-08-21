@@ -28,7 +28,6 @@ class StrategyBase:
         self.last_buy_date = None
         self.events_list = []
 
-
         self.logger = True
         self.ensure_profit = ensure_profit
         self.holding = False  # 持仓控制

@@ -17,6 +17,11 @@ hands: 持仓手数
 
 """
 
+# 若模拟盘则应把df拆成一行行，一点一点的喂进去
+# 或者，如果我们能pandas解决 部分成交/限价单问题。则更好。
+# 对于限价单，我们仍然标记好 买卖信号， 在trade函数中统一处理此逻辑，因为trade也是遍历
+# 但在这里面，我们既然是面向bid/ask 来操作的，就暂时不考虑限价单等问题。
+
 class Toward:
     buy = "buy"
     sell = "sell"
@@ -70,17 +75,31 @@ class StrategyBase4RT:
     # 一个决定一次交易 买/卖 多少手股票的函数
     #@property，有参数无法设置成property
     def hands2trade(self, price:float, size:int, toward:str): #size, 买为asize1， 卖为bsize1
-        raise NotImplementedError
-        #TODO
-        # if self._handscanbought > self.data4cal["asize1"]: 全买
-        # if self._handscanbought < self.data4cal["asize1"]: 买handscanbought
-        return size #最简单的手数
+        """
+        buy: price-ask1, size-asize1
+        sell: price-bid1, size-bsize1
+        size  不要写死成self.data4cal["asize"/"bsize"]， 还是留一个形参
+        """
+        assert(toward in [Toward.buy, Toward.sell])
+        if toward == Toward.buy:
+            hands_can_bought = self._handsCanBought(self.current_funds, price)
+            if hands_can_bought > size:
+                return size
+            else:
+                return hands_can_bought
+        elif toward == Toward.sell:
+            if self.current_hands > size:
+                return size
+            else:
+                return self.current_hands
+        else:
+            raise AttributeError
 
     # 用于实时跟踪当前权益变化
     # 能后续直接推出来的，计算的时候就不放在df中
     @property
     def equity_series(self):
-        return self.data4cal["current_funds"] + self.data4cal["current_hands"] * 100 * self.data4cal["bid1"] # 用买1来衡量吧，这样对我们来讲是更恶劣的条件
+        return self.data4cal["funds"] + self.data4cal["hands"] * 100 * self.data4cal["bid1"] # 用买1来衡量吧，这样对我们来讲是更恶劣的条件
 
     def commissionCal(self, price, volume, toward):
         # 过户费
@@ -128,11 +147,23 @@ class StrategyBase4RT:
 
     @property
     def isholding(self):
+        """
+        有持仓，遇到sell_signal，就卖出
+        """
         if self.current_hands > 0:
             return True
         else:
             return False
-    
+    @property
+    def isenough(self, price):
+        """
+        有足够的钱，遇到buy_signal，就买入
+        """
+        if self._handsCanBought(self.current_funds, price) > 0:
+            return True
+        else:
+            return False
+
     # 加入滑点, 
     def trade(self):
         for date, data in self.data4cal.iterrows():
@@ -316,3 +347,8 @@ class StrategyBase4RT:
         return return_days**(365/days) #两种理解，1.365天里有多少个间隔days的间隔，然后取幂运算 2.先开days次方，求日收益，然后取365次方求年
     def return_days2day(self,return_days, days):
         return return_days**(1/days)
+
+"""
+1.
+
+"""
