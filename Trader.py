@@ -1,6 +1,9 @@
 import pandas as pd 
 import copy
 from trade_date import *
+from pyecharts.charts import Line
+import pyecharts.options as opts
+
 
 idx = pd.IndexSlice
 
@@ -10,7 +13,7 @@ class Toward:
 
 class Account:
     def __init__(self):
-        self.init_funds = 100000000
+        self.init_funds = 100000
 
         self.current_position = {} # {"000001.SZ": 2手, "000002.SZ": 10手}
         self.current_funds = self.init_funds
@@ -106,8 +109,8 @@ class Account:
     
 class Trader:
     """
-    trade_list 实际是一个 time_list, 具体code_list中每一只股票买多少支的逻辑在Trader里实现
-    trade_list = [
+    order_list 实际是一个 time_list, 具体code_list中每一只股票买多少支的逻辑在Trader里实现
+    order_list = [
         {
             Toward: "buy",
             datetime: "2018-05-18 00:00:00",
@@ -120,9 +123,9 @@ class Trader:
     """
 
 
-    def __init__(self, df:pd.DataFrame):
+    def __init__(self, order_list, df:pd.DataFrame):
         self.data4cal = df
-        self.order_list = []
+        self.order_list = order_list
         self.start_date = ""#self.trade_list[0]["datetime"]  #"2018-05-18"
         self.end_date = ""#self.trade_list[-1]["datetime"]   #"2019-04-12"
 
@@ -135,19 +138,18 @@ class Trader:
         self.start_date = self.order_list[0]["datetime"]
         self.end_date = self.order_list[-1]["datetime"]
 
-    def readTradeList(self, trade_list):
-        self.order_list = trade_list
-
+    # 这里因为order中不提供交易量，所以trade直接成交手数为10
     def trade(self):
         # 需要用trade这个步骤来获得 history_position, 不能用 self.trade_list的，因为这里面买点/卖点都有，无法保证持仓，且持仓数量未知
         for order in self.order_list:
             if order["Toward"] == Toward.buy:
                 for code in order["code_set"]:
-                    self.account.buy(code, self.data4cal.loc[(code, order["datetime"]), "S_DQ_CLOSE"][0], 1, order["datetime"]) # 暂时买一手
+                    self.account.buy(code, self.data4cal.loc[(code, order["datetime"]), "S_DQ_CLOSE"][0], 10, order["datetime"]) # 暂时买一手
             elif order["Toward"] == Toward.sell:
                 for code in order["code_set"]:
-                    self.account.sell(code, self.data4cal.loc[(code, order["datetime"]), "S_DQ_CLOSE"][0], 1, order["datetime"]) # 暂时卖一手
+                    self.account.sell(code, self.data4cal.loc[(code, order["datetime"]), "S_DQ_CLOSE"][0], 10, order["datetime"]) # 暂时卖一手
     
+    # 以下函数没在 class Account中实现的原因： Account 中没有 start_date 和 end_date和 self.data4cal
     @property
     def acc_value_Series(self):
 
@@ -181,6 +183,23 @@ class Trader:
     @property
     def acc_equity_Series(self):
         return self.acc_funds_Series + self.acc_value_Series
+    
+    def draw(self, series:pd.Series):
+        line = (
+            Line()
+            .add_xaxis(xaxis_data=list(series.index))
+            .add_yaxis(series_name=series.name,
+                      y_axis=list(series)
+                      )
+        )
+        return line
+    
+    def draw_overlap(self, *args):
+        l = args[0]
+        for i in range(len(args) - 1):
+            l.overlap(args[i+1])
+        return l
+        
 
 def modify4alpha101(df):
     df.rename(columns={"代码":"code","简称":"short_name","日期":"trade_date","前收盘价(元)":"pre_close",
