@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import pyecharts.options as opts
 from pyecharts.charts import Line
 from Slippage import SlippagePct
+from Log import Logger
+
 
 """
 统一变量：
@@ -43,37 +45,44 @@ class StrategyBase4RT:
                                                                                         nan可以被drop掉，最终剩下交易的日子, 废弃掉，假如到 events_list里面
                                                                                         pd.DataFrame, df.columns = []
 
-    
     扩充event_list字段， 加入价/量
 
+    data4cal["history_funds"]   delta_funds         data4cal["history_hands"]
+    剩余资金                     买+/卖- (这样记录符号，方便求平均持仓成本)
+    1100(初始资金)                  0                        
+    1000                         +100                       1            持仓成本：100/手
+    1200                         -200                       0            持仓成本: NaN -> 0，平掉之后要不要归0？
+    900                          +300                       3            持仓成本: (100 - 200 + 300)/3 = 66.6/手  还是直接 100/手
+    1300                         -400                       1            持仓成本：(100 - 200 + 300 - 400)/1 = -200/手
+    这么列出来就清楚了 sum(delta_funds) + 1300 = 初始资金1100
+    1000 = 1100 - 100
+    1200 = 1000 - (-200)
+     990 = 1200 - 300
+    
+    假设初始 200元买2手，那么1手的持仓成本就是100元，150元卖一手，那么剩余1手的持仓成本就是50元
+    假设初始 200元买2手，那么1手的持仓成本就是100元，10元又买一首，那么剩余3手的持仓成本就是210/3=70元
+    负的持仓成本说明历史上一定平过仓，还赚到了钱。
+
     """
-
-
-
-
 
     def __init__(
         self, code, 
         data: pd.DataFrame, 
         init_funds = 100000, 
-        ensure_profit = True, 
+        # ensure_profit = True, 
         logger = True
         ):
         self.code = code
         self.data4cal = copy.deepcopy(data)  # 避免污染原始数据
         self.init_funds = init_funds
+        self.current_funds = init_funds
+        self.current_hands = 0
 
         self.last_buy_date = None
-        self.events_list = []
+        self.trades_list = []
         self.slippage = SlippagePct()
 
-        self.logger = True
-        self.ensure_profit = ensure_profit
-
-        # 通过变量名去操作 data4cal， 避免写死
-        # 废弃掉了，因为 逻辑上 p1 和p2不应该是一个属性
-        self.p1 = "bid1"
-        self.p2 = "ask1"
+        self.logger = Logger(self.code)
 
     # 一个决定一次交易 买/卖 多少手股票的函数
     #@property，有参数无法设置成property
@@ -127,16 +136,6 @@ class StrategyBase4RT:
             raise AttributeError
         return transfer_fee + commission_tax + commission_broker
 
-
-    def potentialProfit(self, bought_date, potential_selling_day, hands2trade):
-        bought_price = self.data4cal.loc[bought_date, "ask1"] # 卖1
-        potential_selling_price = self.data4cal.loc[potential_selling_day, "bid1"]
-        commission_buy = self.commissionCal(bought_price, hands2trade, Toward.buy)
-        commission_sell = self.commissionCal(potential_selling_price, hands2trade, Toward.sell)
-        profit = (potential_selling_price - bought_price) * hands2trade * 100 - commission_buy - commission_sell
-        return profit
-
-
     def _handsCanBought(self, money, price):
         assert (money >= 0 and price >= 0)
         potential_hands = math.floor(money / price / 100)
@@ -157,8 +156,8 @@ class StrategyBase4RT:
             return True
         else:
             return False
-    @property
-    def isenough(self, price):
+    # 不能加property
+    def isFundsEnough(self, price):
         """
         有足够的钱，遇到buy_signal，就买入
         """
@@ -167,207 +166,98 @@ class StrategyBase4RT:
         else:
             return False
 
-    # 加入滑点,  self.p1是 bid, self.p2是ask
-    # 先临时这么写，后续改为 *args
-    def trade(self,p1 = "ask1", p2 = "bid1", s1="asize1", s2="bsize1"):
+    """
+    current_funds：################
+    current_hands：##########
+    trades_list: bsbbssbbbb  当没有asize/bsize时，trades_list 可以保证为 bsbsbsbsbsb， 因为曾经我们的buy和sell 统一用一个开关 isholing控制，
+                现在我们对于buy 和 sell 不统一控制，钱够+buy_signal就买入，有持仓+sell_signal 就卖，这样就不会bsbsbs了
+                所以我们计算每笔交易收益的时候，如bbs，则需要平均bb的购买价格，且不能再使用手里的资金计算收益率
+    
+    data4cal["history_funds"]: append(current_funds),例：[(time1, current_funds1), (time2, current_funds2),...,(timen, current_fundsn)]
+    data4cal["history_hands"]: append(current_hands),例：[(time1, current_hands1), (time2, current_hands2),...,(timen, current_handsn)]
+    不在trade时更改，有了trades_list之后，def history_cal(self) 来获得
+
+    """
+    class P:
+        ask1 = "ask1"
+        bid1 = "bid1"
+        close = "close"
+    class Size:
+        asize1 = "asize1"
+        bsize1 = "bsize1"
+    def trade(self, p1:P = P.ask1, p2:P = P.bid1, s1:Size = Size.asize1, s2:Size = Size.bsize1):
         """
-        部分交易，这个过程比较复杂，需要绘图理解
+        ************************主要作用：创建trades_list, 同时创建data4cal["history_funds]/data4cal["history_hands]
         :param p1:
         :param p2:
         :param s1:
         :param s2:
         :return:
         """
+        history_funds_list = []
+        history_hands_list = []
+        delta_funds_list = [] #与原始资金无关的一个list，用于计算平均持仓成本
 
         for date, data in self.data4cal.iterrows():
-            if (not self.isenough) and data["buy_signal"]:
-                hands_to_trade = self.hands2trade(data[p1],data[s1],Toward.buy)
-                self.current_hands += hands_to_trade
-                cost = hands_to_trade * 100 * data[p1] + self.commissionCal(data[p1],hands_to_trade,Toward.buy)
-                self.events_list.append(("b", date, self.current_funds, #记录买仓之前的历史资金，在这种交易模式下应该废弃掉
-                                         ))
-                self.current_funds -= cost
-                self.last_buy_date = date
-                if self.logger:
-                    print("Bought {} hands of {} on {} at {} price, cost {}".format(hands_to_trade, self.code, date,
-                                                                                    data.close, cost))
 
+            # 用delta_hands 代替 hands_to_trade, 用delta_funds 代替cost/earn，以统一买卖代码格式
+            if self.isFundsEnough(data[p1]) and data["buy_signal"]:
+                # 购买的持仓
+                delta_hands = self.hands2trade(data[p1],data[s1],Toward.buy)
+                # 消耗的资金
+                delta_funds = delta_hands * 100 * data[p1] + self.commissionCal(data[p1],delta_hands,Toward.buy)
+                # 记录在交易列表
+                self.trades_list.append((date, "b"))
+                # 更新持仓
+                self.current_hands += delta_hands
+                # 更新资金
+                self.current_funds -= delta_funds
+                # 记录上一次买仓时间
+                self.last_buy_date = date
+                # log
+                if self.logger:
+                    self.logger.info("Bought {} hands of {} on {} at {} price, cost {}, left {} CNY, hold {} hands".format(
+                                   delta_hands, self.code, date, data[p1], delta_funds, self.current_funds, self.current_hands))
+                # 记录持仓成本(开仓记录为正)
+                delta_funds_list.append(delta_funds)
+            # 避免出现同时买/卖的情况
             elif (self.isholding) and data["sell_signal"]:
-                pass
-    # self.current_hands 修改为 pd的一个column，这样方便计算 实时权益
-    def final(self, df: pd.DataFrame):
-        for date, data in df.iterrows():
-            if (not self.holding) and data.buy:
-                num_hands_to_buy = self._handsCanBought(self.current_funds, data.close)
-                self.current_hands += num_hands_to_buy
-                cost = num_hands_to_buy * 100 * data.close + \
-                       self.commissionCal(data.close, num_hands_to_buy, Toward.buy)
-                
-                self.events_list.append(("b", date, self.current_funds, # 记录买仓之前的历史资金，求单次收益
-                                         self.commissionCal(data.close, num_hands_to_buy, Toward.buy), data.close))
-                self.current_funds -= cost
-                self.last_buy_date = date
 
-
-                self.holding = True
+                # 卖出的手数
+                delta_hands = self.hands2trade(data[p2], data[s2], Toward.sell)
+                # 赚取的资金
+                delta_funds = delta_hands * 100 * data[p2] - self.commissionCal(data[p2], delta_hands, Toward.sell)
+                # 记录在交易列表
+                self.trades_list.append((date, "s"))
+                # 更新持仓
+                self.current_hands -= delta_hands
+                # 更新资金
+                self.current_funds += delta_funds
                 if self.logger:
-                    print("Bought {} hands of {} on {} at {} price, cost {}".format(num_hands_to_buy, self.code, date,
-                                                                              data.close, cost))
-            elif self.holding and data.sell:
-                if self.ensure_profit:
-
-
-                    potential_profit = self.potentialProfit(df, self.last_buy_date, date, self.current_hands)
-                    if potential_profit > 0:
-                        # 不能直接加 potential_profit, 否则买入手续费会计算两次
-                        self.current_funds += self.current_hands * 100 * data.close - \
-                                              self.commissionCal(data.close, self.current_hands, Toward.sell)
-                        if self.logger:
-                            print("Sold {} hands of {} on {} at {} price, profit {}, current funds {}".format(
-                                self.current_hands,self.code, date, data.close, potential_profit,self.current_funds))
-                        self.current_hands = 0  # 一次卖空
-                        self.holding = False
-                        self.events_list.append(("s", date, self.current_funds, # 记录平仓之后的资金，求单次收益
-                                                 self.commissionCal(data.close, self.current_hands, Toward.sell), data.close))
-                else:
-                    self.current_funds += self.current_hands * 100 * data.close - \
-                                          self.commissionCal(data.close, self.current_hands, Toward.sell)
-                    potential_profit = self.potentialProfit(df, self.last_buy_date, date, self.current_hands)
-                    if self.logger:
-                        print("Sold {} hands of {} on {} at {} price, profit {}, current funds {}".format(
-                            self.current_hands, self.code, date, data.close, potential_profit, self.current_funds))
-                    self.current_hands = 0  # 一次卖空
-                    self.holding = False
-                    self.events_list.append(("s", date, self.current_funds,
-                                            self.commissionCal(data.close, self.current_hands, Toward.sell), data.close))
-    @property
-    def final_stock_price(self):
-        return self.data4cal.close.iloc[-1]
-    @property
-    def final_value(self):
-        #最终可能会低于bought的钱数，因为我们又赔了
-        return self.current_funds + self.current_hands * 100 * self.final_stock_price
-    @property
-    def final_return(self):
-        return self.final_value/self.init_funds - 1
-    @property
-    def return_list(self):
-        result = []
-        for i in range(0, len(self.events_list)//2*2, 2): #//2*2 保证b-s成对出现
-            res = self.events_list[i+1][2] / self.events_list[i][2] - 1
-            result.append(res)
-        return result
-    @property
-    def ave_return(self):
-        return np.mean(self.return_list)
-    @property
-    def ave_return_dayly(self):
-        return np.mean(self.return_dayly_list)
-    @property
-    def ave_return_yearly(self):
-        return np.mean(self.return_yearly_list)
+                    self.logger.info("Sold {} hands of {} on {} at {} price, profit {}, left {} CNY, hold {} hands".format(
+                                        delta_hands, self.code, date, data[p2], delta_funds, self.current_funds, self.current_hands))
+                # 记录持仓成本 (卖仓，记录为-值)
+                delta_funds_list.append(-delta_funds)
+            else:
+                delta_funds_list.append(0)
+            
+            # 所以要不停的更新 self.current_funds 和 self.current_hands
+            history_funds_list.append(self.current_funds)
+            history_hands_list.append(self.current_hands)
+        # 历史剩余资金
+        self.data4cal["history_funds"] = history_funds_list
+        # 历史剩余手数
+        self.data4cal["history_hands"] = history_hands_list
+        # 历史交易成本
+        self.data4cal["delta_funds"] = delta_funds_list
     
-    @property
-    def commission_total(self):
-        result = 0
-        for data_tuple in self.events_list:
-            result += data_tuple[3]
-        return result
-    @property
-    def return_yearly_list(self):
-        result = []
-        for i in range(0, len(self.events_list)//2*2, 2): #//2*2 保证b-s成对出现
-            pre_return = self.events_list[i+1][2] / self.events_list[i][2]
-            interval = self.events_list[i+1][1] - self.events_list[i][1]
-            result.append(self.return_days2year(pre_return, interval.days)-1)
-        return result
-    @property
-    def return_dayly_list(self):
-        result = []
-        for i in range(0, len(self.events_list)//2*2, 2): #//2*2 保证b-s成对出现
-            pre_return = self.events_list[i+1][2] / self.events_list[i][2]
-            interval = self.events_list[i+1][1] - self.events_list[i][1]
-            result.append(self.return_days2day(pre_return, interval.days)-1)
-        return result
-    @property
-    def prob_win(self):
-        pos = 0
-        neg = 0
-        for r in self.return_list:
-            if r > 0:
-                pos += 1
-            else: #将nan也记作失败
-                neg += 1
-            # elif r < 0:
-            #     neg +=1
-        try:
-            prob = pos/(pos+neg)
-        except:
-            prob = 0
-        return prob, pos, neg
-    
-    
-    def _init_process(self):
+    def sellSignal(self):
         raise NotImplementedError
-
-
-    #尽量，不要传入参数，以统一格式
-    def buyCondition(self):
+    def buySignal(self):
         raise NotImplementedError
+    def _init(self):
+        self.data4cal["buy_signal"] = self.buySignal()
+        self.data4cal["sell_signal"] = self.sellSignal()
 
-
-    def sellCondition(self):
-        raise NotImplementedError
-    
-    def getEvents(self, begin_date, end_date): #datetime 类型
-        result = []
-        for data in self.events_list:
-            if data[1] >= begin_date and data[1] <= end_date:
-                result.append((data[0], data[1]))
-        return result
-
-    def draw(self):
-        l = (
-            Line()
-            .add_xaxis(xaxis_data=list(self.data4cal.index))
-            .add_yaxis(series_name=self.code,
-                      y_axis=list(self.data4cal.close))
-        )
-        for i in range(0, len(self.events_list)//2*2, 2):
-            x = [self.events_list[i][1], self.events_list[i+1][1]]
-            y = [self.events_list[i][4], self.events_list[i+1][4]]
-            tmp_line = (
-                Line()
-                .add_xaxis(xaxis_data = x)
-                .add_yaxis(
-                    series_name="",
-                    y_axis = y,
-                    symbol="triangle",
-                    symbol_size=20,
-                    linestyle_opts=opts.LineStyleOpts(color="green", width=4, type_="dashed"),
-                    itemstyle_opts=opts.ItemStyleOpts(
-                        border_width=3,border_color="blue",color="blue"
-                    )
-                )
-            )
-            l.overlap(tmp_line)
-        
-        return l
-    
-    
-    def run(self):
-        self._init_process() #后续可以增加 从值中提取，不放在构造函数内部
-        self.final(self.data4cal)
-    
-    def read(self,df):
-        self.data4cal = df
-        
-    def return_days2year(self,return_days, days):
-        return return_days**(365/days) #两种理解，1.365天里有多少个间隔days的间隔，然后取幂运算 2.先开days次方，求日收益，然后取365次方求年
-    def return_days2day(self,return_days, days):
-        return return_days**(1/days)
-
-"""
-1.
-
-"""
+if __name__ == "__main__":
+    print("xx")
