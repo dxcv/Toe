@@ -4,6 +4,8 @@ from numpy import abs
 from numpy import log
 from numpy import sign
 from scipy.stats import rankdata
+import copy
+
 
 # region Auxiliary functions
 def ts_sum(df, window=10):

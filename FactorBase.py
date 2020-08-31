@@ -4,6 +4,8 @@ import numpy as np
 from Alpha101_code_1 import get_alpha
 from trade_date import *
 from scipy.stats import pearsonr
+from tqdm import tqdm
+
 
 class FactorBase:
     """
@@ -15,9 +17,12 @@ class FactorBase:
     def __init__(self, df:pd.DataFrame, start_date, end_date):
         self.init_data = df
         self.data4cal = pd.DataFrame()
+        
+        self.data4cal_code_trade_date = None #self.data4cal.reset_index().set_index(["code", "trade_date"]).sort_index()
+        self.data4cal_trade_date = None #self.data4cal.reset_index().set_index("trade_date").sort_index()
         self.hs300 = pd.DataFrame()
 
-        self.port_stk_num = 10
+        self.port_stk_num = 1
         self.interval = 20
 
         self.ports = []
@@ -33,13 +38,18 @@ class FactorBase:
         self.end_date = end_date
     
     def init(self):
-#         i = 0
+        i = 0
         # close会出现NaN是 alpha101他写的问题，后续重新修改
-        for code, data in self.init_data.groupby("code"):
-#             if i > 9:
-#                 break
-#             i += 1
+        for code, data in tqdm(self.init_data.groupby("code"), desc="进度"):
+            if i > 3:
+                break
+            i += 1
             self.data4cal = pd.concat([self.data4cal, self.getFactors(data)], axis=0)
+        
+#         self.data4cal.sort_index(inplace=True)
+#         self.data4cal["S_DQ_CLOSE"] = self.init_data["S_DQ_CLOSE"]
+#         self.data4cal_code_trade_date = self.data4cal.reset_index().set_index(["code", "trade_date"]).sort_index()
+#         self.data4cal_trade_date = self.data4cal.reset_index().set_index("trade_date").sort_index()
 
     def getFactors(self, data):
         return get_alpha(data)
@@ -48,7 +58,7 @@ class FactorBase:
     # 此处保留port_stk_num, 以保证函数意义
     def getPorts(self, date, port_stk_num, factor_col):
         # 套个list，避免ports.append(Series)
-        code_list = list(self.data4cal.reset_index().set_index("trade_date").loc[date].sort_values(by=factor_col, ascending=False)["code"])
+        code_list = list(self.data4cal_trade_date.loc[date].sort_values(by=factor_col, ascending=False)["code"])
         ports = []
         split_num = len(code_list)//port_stk_num
         for i in range(split_num):
@@ -60,7 +70,9 @@ class FactorBase:
     def portReturn(self, port, date, interval, factor_col):
 
         # 在date日，根据factor选出股票，持有interval天后，获得的factor加权收益
-        df = self.data4cal.reset_index().set_index(["code", "trade_date"])
+        # 不要这个了太影响计算效率
+        #df = self.data4cal.reset_index().set_index(["code", "trade_date"])
+        df = self.data4cal_code_trade_date
         return_list = []
         factor_list = []
         for code in port:
@@ -141,6 +153,7 @@ class FactorBase:
     def readHs300(self, filepath):
         self.hs300 = pd.read_excel(filepath)
         self.hs300["return_daily"] = self.hs300["close"] / self.hs300["close"].shift(1) - 1
+        self.hs300 = self.hs300.reset_index().set_index("trade_date").loc[self.start_date:self.end_date]
 
     # 需要确保 start_date, end_date是交易日，没有做非交易日的处理
     def probExcessHs300(self, port, start_date, end_date, factor_col):
@@ -150,14 +163,14 @@ class FactorBase:
         """
         end_date_modify = get_next_trade_date(end_date, - self.interval)
         # hs300_df 索引的时候，要减少interval的天数
-        hs300_df = self.hs300.reset_index().set_index("trade_date").loc[start_date: end_date_modify]
+        hs300_df = self.hs300.loc[start_date: end_date_modify]
         port_return_list = []
         for date in trade_date_range(start_date, end_date_modify):
             
             # 如果全部遍历 start_date, end_date，那这个20会导致超范围
             port_return_list.append(self.portReturn(port, date, self.interval, factor_col))
-        if len(port_return_list) != len(hs300_df):
-            raise ValueError
+#         if len(port_return_list) != len(hs300_df): 废弃，因为我们end_date_modify了
+#             raise ValueError
 
         tmp_array = np.array(port_return_list) - np.array(hs300_df["return_daily"])
         gt_num = len(tmp_array[tmp_array > 0])
@@ -168,14 +181,14 @@ class FactorBase:
     def probBelowHs300(self, port, start_date, end_date, factor_col):
         end_date_modify = get_next_trade_date(end_date, -self.interval)
         # hs300_df 索引的时候，要减少interval的天数
-        hs300_df = self.hs300.reset_index().set_index("trade_date").loc[start_date: end_date_modify]
+        hs300_df = self.hs300.loc[start_date: end_date_modify]
         port_return_list = []
         for date in trade_date_range(start_date, end_date_modify):
             
             # 如果全部遍历 start_date, end_date，那这个20会导致超范围
             port_return_list.append(self.portReturn(port, date, self.interval, factor_col))
-        if len(port_return_list) != len(hs300_df):
-            raise ValueError
+#         if len(port_return_list) != len(hs300_df):
+#             raise ValueError
 
         tmp_array = np.array(port_return_list) - np.array(hs300_df["return_daily"])
         lt_num = len(tmp_array[tmp_array < 0])
@@ -204,7 +217,7 @@ class FactorBase:
     # 后续将0.5这个阈值设置为 形参，取消掉port_stk_num, start_date, end_date, interval,df
     def rawFactors(self, threshold = 0.5):
         self.raw_factors = []
-        for factor in self.original_factors:
+        for factor in tqdm(self.original_factors):
             corr = self.factorsPortsCorrCal(self.port_stk_num, self.start_date, self.end_date, factor)
             self.factor_corr_dict[factor] = corr
             if abs(corr[0]) > threshold:
@@ -215,7 +228,7 @@ class FactorBase:
     # 还是 threshhold
     def refineFactors(self, threshhold = 0.5):
         self.refined_factors = []
-        for factor in self.raw_factors:
+        for factor in tqdm(self.raw_factors):
             ports = self.getPorts(self.start_date, self.port_stk_num, factor)
 
             if self.factor_corr_dict[factor][0] > 0:
@@ -297,21 +310,21 @@ class FactorBase:
                     return (x - x.mean())/x.std() #要有return才能用到apply里面，且只能是df.apply才可以
                 else:
                     return -(x - x.mean())/x.std() # 负相关时取相反数
-            self.data4cal["factor4rank"] = self.data4cal[self.final_factors].apply(z_score, axis=0).sum(axis=1)
+            self.data4cal_trade_date["factor4rank"] = self.data4cal_trade_date[self.final_factors].apply(z_score, axis=0).sum(axis=1)
         
         ports = self.getPorts(date, self.port_stk_num, "factor4rank")
         return ports[0]
     
     
-    def getTradeList(self, start_date, end_date):
+    def getOrderList(self, start_date, end_date):
         count = 1
         code_set = set(self.getHolding(start_date))
-        trade_dict = {
+        order_dict = {
             "Toward":"buy",
             "datetime":start_date,
             "code_set":code_set
         }
-        trade_list = [trade_dict]
+        order_list = [order_dict]
         for date in trade_date_range(start_date, end_date):
             if count > self.interval:
                 count = 1
@@ -322,22 +335,22 @@ class FactorBase:
                 #TODO，code_set2 和 code_set1 存在交集的处理
                 #___________________________________________
                 
-                trade_dict = {
+                order_dict = {
                     "Toward" : "sell",
                     "datetime":date,
                     "code_set":code_set
                 }
-                trade_list.append(trade_dict)
+                order_list.append(order_dict)
                 code_set = code_set2
-                trade_dict = {
+                order_dict = {
                     "Toward" : "buy",
                     "datetime":date,
                     "code_set":code_set
                 }
-                trade_list.append(trade_dict)
+                order_list.append(order_dict)
             else:
                 count += 1
-        return trade_list
+        return order_list
     
 def modify4alpha101(df):
     df.rename(columns={"代码":"code","简称":"short_name","日期":"trade_date","前收盘价(元)":"pre_close",
@@ -355,7 +368,5 @@ def modify4alpha101(df):
     
     df["S_DQ_PCTCHANGE"].fillna(value = (df["S_DQ_CLOSE"]/df["S_DQ_CLOSE"].shift(1) - 1), inplace=True)
     # 对于全市场数据就不要返回 tuple
-    return df.loc["2018-05-01":"2019-04-30", ["code", "S_DQ_OPEN", "S_DQ_HIGH", "S_DQ_LOW", "S_DQ_CLOSE", "S_DQ_VOLUME", "S_DQ_AMOUNT", "S_DQ_PCTCHANGE"]]
+    return df.loc["2017-05-01":"2019-04-30", ["code", "S_DQ_OPEN", "S_DQ_HIGH", "S_DQ_LOW", "S_DQ_CLOSE", "S_DQ_VOLUME", "S_DQ_AMOUNT", "S_DQ_PCTCHANGE"]]
  
-
-
