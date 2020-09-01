@@ -3,7 +3,7 @@ import copy
 from trade_date import *
 from pyecharts.charts import Line
 import pyecharts.options as opts
-
+import math
 
 idx = pd.IndexSlice
 
@@ -13,7 +13,7 @@ class Toward:
 
 class Account:
     def __init__(self):
-        self.init_funds = 100000
+        self.init_funds = 1000000 # 初始资金100w， 每只股票分10w
 
         self.current_position = {} # {"000001.SZ": 2手, "000002.SZ": 10手}
         self.current_funds = self.init_funds
@@ -34,6 +34,11 @@ class Account:
         # self.history_position 和 self.history_funds 的 keys是一致的
         self.history_position = {} #pd.DataFrame(columns=["code", "trade_date", "hands"]).set_index(["code", "trade_date"]) #code要在前
         self.history_funds = {} # {"2018-05-18":100000, }
+        
+        # 以下通过Trader获取
+        self.acc_value_Series = None
+        self.acc_funds_Series = None
+        self.acc_equity_Series = None
     
     # 在buy外面判断 资金是否充裕
     def buy(self, code, price, volume, date):
@@ -57,7 +62,40 @@ class Account:
         # !!!!!!!!!!!!!!!!必须得是 copy.deepcopy，不然因为都是引用，最终每一天都是一样了
         self.history_position[date] = copy.deepcopy(self.current_position)
         self.history_funds[date] = self.current_funds
-
+        
+    def hands_can_bought(self, money, price):
+        assert (money >= 0 and price >= 0)
+        potential_hands = math.floor(money / price / 100)
+        left_money = money - potential_hands * 100 * price - self.commission_cal(price, potential_hands, Toward.buy)
+        if left_money >= 0:
+            return potential_hands
+        elif potential_hands >= 1:
+            return potential_hands - 1
+        elif potential_hands == 0:
+            return 0
+        
+    def buyByMoney(self, code, price, money, date):
+        hands_can_bought = self.hands_can_bought(money, price)
+        commission = self.commission_cal(price, hands_can_bought, Toward.buy)
+        # 消耗的资金
+        delta_funds = hands_can_bought * 100 * price + commission
+        
+        print("buy {} cny of {} on {}, {} hands, price {}".format(delta_funds, code, date, hands_can_bought, price))
+        
+        if self.current_funds < delta_funds:
+            raise ValueError
+        
+        if code in self.current_position:
+            self.current_position[code] += hands_can_bought
+        else:
+            self.current_position[code] = hands_can_bought
+        
+        self.current_funds -= delta_funds
+        
+        self.history_position[date] = copy.deepcopy(self.current_position)
+        self.history_funds[date] = copy.deepcopy(self.current_funds)
+    
+    # sell 就暂时不sellByMoney了
     def sell(self, code, price, volume, date):
         # 持仓判断
         if code in self.current_position:
@@ -77,10 +115,13 @@ class Account:
         commission = self.commission_cal(price, volume, Toward.sell)
         # 赚取的资金
         delta_funds = volume * 100 * price - commission
+        #print("sell {} cny of {} on {}, {} hands".format(delta_funds, code, date, volume))
         self.current_funds += delta_funds
         self.history_position[date] = copy.deepcopy(self.current_position)
         self.history_funds[date] = self.current_funds
-
+        
+        
+    
     def commission_cal(self, price, volume, toward):
         # 过户费
         transfer_fee = 0
@@ -123,9 +164,10 @@ class Trader:
     """
 
 
-    def __init__(self, order_list, df:pd.DataFrame):
-        self.data4cal = df
-        self.order_list = order_list
+    def __init__(self, df:pd.DataFrame):
+        self.data4cal = copy.deepcopy(df)
+        self.data4value = copy.deepcopy(df)
+        self.order_list = ""
         self.start_date = ""#self.trade_list[0]["datetime"]  #"2018-05-18"
         self.end_date = ""#self.trade_list[-1]["datetime"]   #"2019-04-12"
 
@@ -135,22 +177,36 @@ class Trader:
     def init(self, order_list):
         self.order_list = order_list
         self.data4cal = self.data4cal.reset_index().set_index(["code", "trade_date"]).sort_index()
+        self.data4value = self.data4value.reset_index().set_index(["code", "trade_date"]).sort_index()
         self.start_date = self.order_list[0]["datetime"]
         self.end_date = self.order_list[-1]["datetime"]
 
     # 这里因为order中不提供交易量，所以trade直接成交手数为10
-    def trade(self):
+    def tradeOneHand(self):
         # 需要用trade这个步骤来获得 history_position, 不能用 self.trade_list的，因为这里面买点/卖点都有，无法保证持仓，且持仓数量未知
         for order in self.order_list:
             if order["Toward"] == Toward.buy:
                 for code in order["code_set"]:
-                    self.account.buy(code, self.data4cal.loc[(code, order["datetime"]), "S_DQ_CLOSE"][0], 10, order["datetime"]) # 暂时买一手
+                    self.account.buy(code, self.data4cal.loc[(code, order["datetime"]), "S_DQ_CLOSE"][0], 1, order["datetime"]) # 暂时买一手
             elif order["Toward"] == Toward.sell:
                 for code in order["code_set"]:
-                    self.account.sell(code, self.data4cal.loc[(code, order["datetime"]), "S_DQ_CLOSE"][0], 10, order["datetime"]) # 暂时卖一手
+                    self.account.sell(code, self.data4cal.loc[(code, order["datetime"]), "S_DQ_CLOSE"][0], 1, order["datetime"]) # 暂时卖一手
+    
+    # 每只股票买固定金额，卖全部
+    def tradeByMoney(self):
+        for order in self.order_list:
+            if order["Toward"] == Toward.buy:
+                # 若买，则提前计算好每只股票买多少钱
+                money = self.account.current_funds / 10
+                for code in order["code_set"]:
+                    self.account.buyByMoney(code, self.data4cal.loc[(code, order["datetime"]), "S_DQ_CLOSE"][0], money, order["datetime"]) # 暂时买一手
+            elif order["Toward"] == Toward.sell:
+                for code in order["code_set"]:
+                    self.account.sell(code, self.data4cal.loc[(code, order["datetime"]), "S_DQ_CLOSE"][0], self.account.current_position[code], order["datetime"]) # 暂时卖一手
+    
     
     # 以下函数没在 class Account中实现的原因： Account 中没有 start_date 和 end_date和 self.data4cal
-    @property
+    
     def acc_value_Series(self):
 
         current_position_Series = None
@@ -160,15 +216,24 @@ class Trader:
         for date in trade_date_range(self.start_date, self.end_date):
             # 这里的实现我应该记一下，这样就没用到双指针了
             if date in history_position_dict_dict.keys():
-                current_position_Series = pd.Series(history_position_dict_dict[date])
+                current_position_Series = pd.Series(history_position_dict_dict[date]) * 100 # 之前忘记了这里是手数应该乘100
 
             # 不能直接两个Series相乘，因为一个的index是code，另一个是[code, trade_date]
             # position使用current_position_Series.index来索引就可以保证code是对应的了
-            position_value = (self.data4cal.loc[idx[current_position_Series.index, date], "S_DQ_CLOSE"].values * current_position_Series.values).sum()
-            result[date] = position_value
-        return pd.Series(result)
+            #position_value = (self.data4cal.loc[idx[current_position_Series.index, date], "S_DQ_CLOSE"].values * current_position_Series.values).sum()
 
-    @property
+                
+            # 问题出在了 value1 和 value2的索引没有对应, 所以下面加了一个 sort_index()， 以使得转换后的np.array对应
+            # 说明的第二个事情： loc[list] 获得最终索引，和list的顺序不一定一致！！！
+            value1 = self.data4value.loc[idx[current_position_Series.index, date], "S_DQ_CLOSE"].sort_index().values #.values
+            value2 = current_position_Series.sort_index().values #.values
+            
+            position_value = (value1 * value2).sum()
+            result[date] = position_value
+        self.account.acc_value_Series = pd.Series(result)
+        return self.account.acc_value_Series
+
+    
     def acc_funds_Series(self):
 
         history_funds_dict = self.account.history_funds
@@ -178,11 +243,14 @@ class Trader:
             if date in history_funds_dict.keys():
                 current_funds = history_funds_dict[date]
             result[date] = current_funds
-        return pd.Series(result)
+        
+        self.account.acc_funds_Series = pd.Series(result)
+        return self.account.acc_funds_Series
 
-    @property
+    
     def acc_equity_Series(self):
-        return self.acc_funds_Series + self.acc_value_Series
+        self.account.acc_equity_Series = self.acc_funds_Series() + self.acc_value_Series()
+        return self.account.acc_equity_Series
     
     def draw(self, series:pd.Series):
         line = (
@@ -217,5 +285,5 @@ def modify4alpha101(df):
     
     df["S_DQ_PCTCHANGE"].fillna(value = (df["S_DQ_CLOSE"]/df["S_DQ_CLOSE"].shift(1) - 1), inplace=True)
     # 对于全市场数据就不要返回 tuple
-    return df.loc["2018-05-01":"2019-04-30", ["code", "S_DQ_OPEN", "S_DQ_HIGH", "S_DQ_LOW", "S_DQ_CLOSE", "S_DQ_VOLUME", "S_DQ_AMOUNT", "S_DQ_PCTCHANGE"]]
+    return df.loc["2017-05-01":"2019-04-30", ["code", "S_DQ_OPEN", "S_DQ_HIGH", "S_DQ_LOW", "S_DQ_CLOSE", "S_DQ_VOLUME", "S_DQ_AMOUNT", "S_DQ_PCTCHANGE"]]
  
