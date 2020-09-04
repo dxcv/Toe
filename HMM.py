@@ -17,8 +17,11 @@ class HMMStrategy:
         
         self._split_train_test_data(test_size)
         self._compute_all_possible_outcomes(
-            n_steps_frac_change, n_steps_frac_high, n_steps_frac_low
-        )
+            n_steps_frac_change, n_steps_frac_high, n_steps_frac_low)
+
+        self.start_date = ""
+        self.end_date = ""
+
     
     def _split_train_test_data(self, test_size):
         self._train_data_df, self._test_data_df = train_test_split(self.data4cal, test_size=test_size, shuffle=False) 
@@ -107,5 +110,31 @@ class HMMStrategy:
         predicted_close_prices = []
         for day_index in tqdm(range(days)):
             predicted_close_prices.append(self.predict_close_price(day_index))
-            
         return predicted_close_prices
+
+    def predict_close_price_by_date(self, date):
+        day_index = self.data4cal.index.get_loc(date)
+        return self.predict_close_price(day_index)
+
+    def predict_close_price_for_date_range(self, start_date, end_date):
+        predicted_close_prices = []
+        start_index = self.data4cal.index.get_loc(start_date)
+        end_index = self.data4cal.index.get_loc(end_date)
+        for day_index in tqdm(range(start_index, end_index, 1)):
+            predicted_close_prices.appennd(self.predict_close_price(day_index))
+        # 最好是能够按照start_date, end_date 中间的交易日作为index，返回Series
+        return predicted_close_prices
+
+    def getOrderList(self, start_date, end_date):
+        for predicted_close_price in predicted_close_prices:
+            if predicted_close_price > open_price:
+                "buy"
+            elif predicted_close_price < hold_price:
+                "sell"
+
+        pass
+
+if __name__ == "__main__":
+
+
+    HMMStrategy("000001.SZ", df)
